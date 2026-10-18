@@ -1,0 +1,14 @@
+node_modules/
+server/node_modules/
+dist/
+android/.gradle/
+android/build/
+android/app/build/
+*.apk
+.env
+.env.*
+!.env.example
+
+# Local Firebase Android configuration
+android/app/google-services.json
+*.bat
