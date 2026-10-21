@@ -18,6 +18,23 @@ const allowedOrigins = new Set(
     .filter(Boolean)
 );
 
+if (process.env.RENDER_EXTERNAL_URL) {
+  allowedOrigins.add(process.env.RENDER_EXTERNAL_URL.trim());
+}
+
+function isOriginAllowed(origin) {
+  if (!origin) return true;
+  if (allowedOrigins.has(origin)) return true;
+  // Allow all *.onrender.com subdomains dynamically
+  if (/^https?:\/\/[a-z0-9-]+\.onrender\.com$/i.test(origin)) return true;
+  // Allow localhost
+  if (/^https?:\/\/localhost(:[0-9]+)?$/i.test(origin)) return true;
+  if (/^https?:\/\/127\.0\.0\.1(:[0-9]+)?$/i.test(origin)) return true;
+  // Allow native mobile webviews
+  if (origin.startsWith('capacitor://') || origin.startsWith('ionic://')) return true;
+  return false;
+}
+
 const adminEmails = new Set(
   (process.env.ADMIN_EMAILS || '')
     .split(',')
@@ -52,8 +69,9 @@ function getVerifiedFirebaseAuth() {
 const corsOptions = {
   origin(origin, callback) {
     // Native WebViews and same-origin server calls may omit Origin.
-    if (!origin || allowedOrigins.has(origin)) return callback(null, true);
-    return callback(new Error('Origin is not allowed by CORS'));
+    if (isOriginAllowed(origin)) return callback(null, true);
+    // Never call callback(new Error(...)) — it crashes Express with 500 error on browser script imports!
+    return callback(null, false);
   },
   credentials: false,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -1217,9 +1235,24 @@ io.on('connection', (socket) => {
 });
 
 // 7. Static Frontend & SPA Catch-all
-app.use(express.static(path.join(__dirname, '../dist')));
+app.use(express.static(path.join(__dirname, '../dist'), {
+  maxAge: '1h',
+  setHeaders: (res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+}));
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../dist/index.html'));
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled server error:', err);
+  if (res.headersSent) {
+    return next(err);
+  }
+  res.status(500).json({ error: err.message || 'Internal Server Error' });
 });
 
 const PORT = process.env.PORT || 3001;
