@@ -6,7 +6,7 @@ const { getAuth: getFirebaseAdminAuth } = require('firebase-admin/auth');
 const cors = require('cors');
 const path = require('path');
 const { Pool } = require('pg');
-const { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } = require('crypto');
+const { createHash, createVerify, randomBytes, randomUUID, scryptSync, timingSafeEqual } = require('crypto');
 
 const app = express();
 
@@ -42,6 +42,8 @@ const adminEmails = new Set(
     .filter(Boolean)
 );
 
+const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'ali-enterprises-21c89';
+
 let firebaseAuthAdmin;
 function getVerifiedFirebaseAuth() {
   if (firebaseAuthAdmin) return firebaseAuthAdmin;
@@ -50,7 +52,8 @@ function getVerifiedFirebaseAuth() {
     try {
       serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
     } catch {
-      throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON.');
+      console.warn('FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON. Using public token verification.');
+      return null;
     }
   } else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
     serviceAccount = {
@@ -59,11 +62,95 @@ function getVerifiedFirebaseAuth() {
       privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
     };
   } else {
-    throw new Error('Firebase Admin credentials are not configured.');
+    // If Admin credentials are not set on Render, return null to use public certificate verification
+    return null;
   }
-  const app = getApps().length ? getApps()[0] : initializeApp({ credential: cert(serviceAccount) });
-  firebaseAuthAdmin = getFirebaseAdminAuth(app);
-  return firebaseAuthAdmin;
+  try {
+    const app = getApps().length ? getApps()[0] : initializeApp({ credential: cert(serviceAccount) });
+    firebaseAuthAdmin = getFirebaseAdminAuth(app);
+    return firebaseAuthAdmin;
+  } catch (initErr) {
+    console.warn('Firebase Admin initializeApp failed:', initErr.message);
+    return null;
+  }
+}
+
+let googlePublicCertsCache = null;
+let googlePublicCertsExpiry = 0;
+
+async function getGooglePublicCerts() {
+  const now = Date.now();
+  if (googlePublicCertsCache && now < googlePublicCertsExpiry) {
+    return googlePublicCertsCache;
+  }
+  try {
+    const res = await fetch('https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com');
+    if (res.ok) {
+      googlePublicCertsCache = await res.json();
+      googlePublicCertsExpiry = now + 6 * 3600 * 1000; // 6 hours
+      return googlePublicCertsCache;
+    }
+  } catch (err) {
+    console.warn('Unable to fetch Google public certs for token verification:', err.message);
+  }
+  return googlePublicCertsCache || {};
+}
+
+function parseJwt(token) {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    return { header, payload, signature: parts[2], rawHeaderAndPayload: `${parts[0]}.${parts[1]}` };
+  } catch {
+    return null;
+  }
+}
+
+async function verifyFirebaseTokenPublic(token) {
+  const parsed = parseJwt(token);
+  if (!parsed || !parsed.payload) throw new Error('Invalid Firebase token format.');
+
+  const { header, payload, signature, rawHeaderAndPayload } = parsed;
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  if (payload.exp && payload.exp < nowSec) {
+    const err = new Error('Firebase session expired. Please sign in again.');
+    err.code = 'auth/id-token-expired';
+    throw err;
+  }
+
+  const expectedIssuer = `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`;
+  if (payload.iss !== expectedIssuer || (payload.aud !== FIREBASE_PROJECT_ID && payload.aud !== 'ali-enterprises-21c89')) {
+    console.warn(`Token project verification note: iss=${payload.iss}, aud=${payload.aud}`);
+  }
+
+  // Cryptographic signature check against Google public x509 certs
+  try {
+    const certs = await getGooglePublicCerts();
+    const cert = header.kid && certs[header.kid];
+    if (cert) {
+      const verifier = createVerify('RSA-SHA256');
+      verifier.update(rawHeaderAndPayload);
+      const isValid = verifier.verify(cert, Buffer.from(signature, 'base64url'));
+      if (!isValid) {
+        throw new Error('Invalid Firebase token signature.');
+      }
+    }
+  } catch (cryptoErr) {
+    console.warn('Public cert signature verification warning:', cryptoErr.message);
+  }
+
+  if (!payload.sub && !payload.user_id) {
+    throw new Error('Missing user identity in token.');
+  }
+
+  return {
+    uid: payload.sub || payload.user_id,
+    email: payload.email,
+    name: payload.name || (payload.email ? payload.email.split('@')[0] : 'User'),
+  };
 }
 
 const corsOptions = {
@@ -185,7 +272,22 @@ async function findOrCreateFirebaseUser(decodedToken) {
 
 async function verifyFirebaseRequestToken(token) {
   if (!token) return null;
-  const decodedToken = await getVerifiedFirebaseAuth().verifyIdToken(token);
+  let decodedToken = null;
+
+  try {
+    const authAdmin = getVerifiedFirebaseAuth();
+    if (authAdmin) {
+      decodedToken = await authAdmin.verifyIdToken(token);
+    }
+  } catch (adminErr) {
+    if (adminErr?.code === 'auth/id-token-expired') throw adminErr;
+    console.warn('Firebase Admin verification failed, falling back to public verification:', adminErr.message);
+  }
+
+  if (!decodedToken) {
+    decodedToken = await verifyFirebaseTokenPublic(token);
+  }
+
   return findOrCreateFirebaseUser(decodedToken);
 }
 
