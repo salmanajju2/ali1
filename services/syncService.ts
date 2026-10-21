@@ -28,7 +28,7 @@ class AivenSyncService {
       for (const transaction of unsyncedLocal) {
         if (String(transaction.id).startsWith('temp_')) {
           let txToSend = { ...transaction };
-          // If slip was saved locally as base64 while offline, upload now
+          // If slip was saved locally as base64 while offline, upload now to Cloudinary
           if (txToSend.slip && txToSend.slip.startsWith('data:')) {
             try {
               const uploadedUrl = await uploadSlip(txToSend.slip);
@@ -36,10 +36,11 @@ class AivenSyncService {
                 txToSend.slip = uploadedUrl;
                 await localDB.saveTransaction(txToSend);
               } else {
-                txToSend.slip = undefined;
+                // Keep the local base64 slip and retry when connection is solid
+                continue;
               }
             } catch {
-              txToSend.slip = undefined;
+              continue;
             }
           }
           await aivenDatabase.addTransaction(txToSend);

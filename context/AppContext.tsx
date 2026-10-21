@@ -635,25 +635,48 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
       for (const localTx of unsyncedLocal) {
         console.log(`📤 Uploading offline transaction ${localTx.id} to Aiven PostgreSQL.`);
-        if (!localTx.id.toString().startsWith('temp_') && !localTx.id.toString().startsWith('recovered_')) {
-          const updated = await aivenDatabase.updateTransaction(localTx);
-          if (updated) {
-            localTx.isSynced = true;
-            pendingUpdateIdsRef.current.delete(localTx.id);
-            recentlyUpdatedIdsRef.current.add(localTx.id);
-            await localDB.saveTransaction(localTx);
-            // ✅ UI mein bhi synced mark karo
-            setAllTransactions(prev => prev.map(tx => tx.id === localTx.id ? { ...tx, isSynced: true } : tx));
+
+        let txToSend: Transaction = { ...localTx };
+
+        // Offline photo/slip upload to Cloudinary before sending transaction to server
+        if (txToSend.slip && txToSend.slip.startsWith('data:')) {
+          console.log(`📤 Manual sync: Uploading offline slip for ${txToSend.id} to Cloudinary...`);
+          try {
+            const uploadedUrl = await uploadSlip(txToSend.slip);
+            if (uploadedUrl) {
+              txToSend.slip = uploadedUrl;
+              console.log(`✅ Manual sync: Offline slip uploaded to Cloudinary: ${uploadedUrl}`);
+              await localDB.saveTransaction(txToSend);
+              setAllTransactions(prev => prev.map(tx => tx.id === txToSend.id ? { ...tx, slip: uploadedUrl } : tx));
+            } else {
+              console.warn(`⚠️ Cloudinary upload not ready for ${txToSend.id}. Skipping until network is stable.`);
+              continue;
+            }
+          } catch (slipErr) {
+            console.warn(`⚠️ Cloudinary upload error for ${txToSend.id}:`, slipErr);
             continue;
           }
         }
 
-        const newServerId = await aivenDatabase.addTransaction(localTx);
+        if (!txToSend.id.toString().startsWith('temp_') && !txToSend.id.toString().startsWith('recovered_')) {
+          const updated = await aivenDatabase.updateTransaction(txToSend);
+          if (updated) {
+            const syncedTx = { ...txToSend, isSynced: true };
+            pendingUpdateIdsRef.current.delete(txToSend.id);
+            recentlyUpdatedIdsRef.current.add(txToSend.id);
+            await localDB.saveTransaction(syncedTx);
+            // ✅ UI mein bhi synced mark karo
+            setAllTransactions(prev => prev.map(tx => tx.id === txToSend.id ? syncedTx : tx));
+            continue;
+          }
+        }
+
+        const newServerId = await aivenDatabase.addTransaction(txToSend);
         if (newServerId) {
-          const oldId = localTx.id;
+          const oldId = txToSend.id;
           idRecordMap[oldId] = newServerId;
 
-          const syncedTx = { ...localTx, id: newServerId, isSynced: true };
+          const syncedTx = { ...txToSend, id: newServerId, isSynced: true };
 
           if (oldId !== newServerId) {
             await localDB.deleteTransaction(oldId);
@@ -665,7 +688,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
             tx.id === oldId ? syncedTx : tx
           ));
 
-          console.log(`✅ Offline transaction uploaded: ${oldId} → ${newServerId}`);
+          console.log(`✅ Offline transaction uploaded with slip: ${oldId} → ${newServerId}`);
         }
       }
 
@@ -895,29 +918,51 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           for (const tx of unsyncedLocal) {
             const isExistingServerTransaction = !tx.id.startsWith('temp_') && !tx.id.startsWith('recovered_');
 
+            let txToSend: Transaction = { ...tx };
+
+            // Upload offline slip to Cloudinary before sending transaction to server
+            if (txToSend.slip && txToSend.slip.startsWith('data:')) {
+              console.log(`📤 Auto-sync: Uploading offline slip for ${txToSend.id} to Cloudinary...`);
+              try {
+                const uploadedUrl = await uploadSlip(txToSend.slip);
+                if (uploadedUrl) {
+                  txToSend.slip = uploadedUrl;
+                  console.log(`✅ Auto-sync: Offline slip uploaded to Cloudinary: ${uploadedUrl}`);
+                  await localDB.saveTransaction(txToSend);
+                  setAllTransactions(prev => prev.map(t => t.id === txToSend.id ? { ...t, slip: uploadedUrl } : t));
+                } else {
+                  console.warn(`⚠️ Cloudinary slip upload not ready for ${txToSend.id}. Will retry.`);
+                  continue; // Don't upload without the slip! Wait for next sync when connection is ready.
+                }
+              } catch (slipErr) {
+                console.warn(`⚠️ Cloudinary slip upload error for ${txToSend.id}:`, slipErr);
+                continue;
+              }
+            }
+
             if (isExistingServerTransaction) {
-              const updated = await aivenDatabase.updateTransaction({ ...tx, isSynced: true });
+              const updated = await aivenDatabase.updateTransaction({ ...txToSend, isSynced: true });
               if (updated) {
-                const syncedTx = { ...tx, isSynced: true };
+                const syncedTx = { ...txToSend, isSynced: true };
                 await localDB.saveTransaction(syncedTx);
-                setAllTransactions(prev => prev.map(t => t.id === tx.id ? syncedTx : t));
-                pendingUpdateIdsRef.current.delete(tx.id);
-                recentlyUpdatedIdsRef.current.add(tx.id);
+                setAllTransactions(prev => prev.map(t => t.id === txToSend.id ? syncedTx : t));
+                pendingUpdateIdsRef.current.delete(txToSend.id);
+                recentlyUpdatedIdsRef.current.add(txToSend.id);
                 realtimeSync.notifyUpdate({ action: 'update', transaction: syncedTx });
-                console.log(`✅ Auto-synced transaction update: ${tx.id}`);
+                console.log(`✅ Auto-synced transaction update with slip: ${txToSend.id}`);
               }
               continue;
             }
 
             const oldId = tx.id;
-            const newServerId = await aivenDatabase.addTransaction(tx);
+            const newServerId = await aivenDatabase.addTransaction(txToSend);
             if (newServerId) {
-              const syncedTx = { ...tx, id: newServerId, isSynced: true };
+              const syncedTx = { ...txToSend, id: newServerId, isSynced: true };
               await localDB.deleteTransaction(oldId);
               await localDB.saveTransaction(syncedTx);
               setAllTransactions(prev => prev.map(t => t.id === oldId ? syncedTx : t));
               realtimeSync.notifyUpdate({ action: 'add', transaction: syncedTx });
-              console.log(`✅ Auto-uploaded offline transaction: ${oldId} → ${newServerId}`);
+              console.log(`✅ Auto-uploaded offline transaction with slip: ${oldId} → ${newServerId}`);
             }
           }
         }
@@ -1284,12 +1329,14 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
                 ));
                 await saveToLocalWithRetry(transactionForServer);
               } else {
-                console.warn('⚠️ Receipt upload pending/failed; keeping local copy, saving transaction without remote receipt.');
-                transactionForServer = { ...newTransaction, slip: undefined };
+                console.warn('📴 Offline or slip upload pending; keeping full slip in LocalDB for online auto-sync.');
+                setDatabaseConnected(false);
+                return;
               }
             } catch (slipError) {
-              console.warn('⚠️ Receipt upload failed:', slipError);
-              transactionForServer = { ...newTransaction, slip: undefined };
+              console.warn('📴 Offline or slip upload error; keeping full slip in LocalDB for online auto-sync:', slipError);
+              setDatabaseConnected(false);
+              return;
             }
           }
 
@@ -1569,10 +1616,26 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         // Upload updated slip (agar naya slip data: URL hai to)
         if (txToProcess.slip && txToProcess.slip.startsWith('data:')) {
           console.log('📤 Uploading updated slip via StorageService in background...');
-          const uploadedUrl = await uploadSlip(txToProcess.slip);
-          if (uploadedUrl) {
-            txToProcess = { ...txToProcess, slip: uploadedUrl };
-            console.log('✅ Updated slip uploaded:', uploadedUrl);
+          try {
+            const uploadedUrl = await uploadSlip(txToProcess.slip);
+            if (uploadedUrl) {
+              txToProcess = { ...txToProcess, slip: uploadedUrl };
+              console.log('✅ Updated slip uploaded:', uploadedUrl);
+            } else {
+              console.warn('📴 Offline or slip upload pending; keeping in LocalDB for online auto-sync.');
+              const unsyncedUpdate = { ...txToProcess, isSynced: false };
+              await localDB.saveTransaction(unsyncedUpdate);
+              setAllTransactions(prev => prev.map(tx => String(tx.id) === String(unsyncedUpdate.id) ? unsyncedUpdate : tx));
+              setDatabaseConnected(false);
+              return;
+            }
+          } catch (slipErr) {
+            console.warn('📴 Slip upload failed offline; keeping in LocalDB for online auto-sync:', slipErr);
+            const unsyncedUpdate = { ...txToProcess, isSynced: false };
+            await localDB.saveTransaction(unsyncedUpdate);
+            setAllTransactions(prev => prev.map(tx => String(tx.id) === String(unsyncedUpdate.id) ? unsyncedUpdate : tx));
+            setDatabaseConnected(false);
+            return;
           }
         }
 
