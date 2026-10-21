@@ -13,7 +13,8 @@
 	},
 	"server": {
 		"allowNavigation": [
-			"ali-ltyt.onrender.com"
+			"ali-ltyt.onrender.com",
+			"*.onrender.com"
 		]
 	}
 }

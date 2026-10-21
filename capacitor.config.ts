@@ -17,6 +17,7 @@ const config: CapacitorConfig = {
     // APK ke liye Socket server hostname explicitly allow karo
     allowNavigation: [
       'ali-ltyt.onrender.com',
+      '*.onrender.com',
     ],
   },
 };

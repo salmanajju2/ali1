@@ -77,12 +77,13 @@ const databaseUrl = new URL(process.env.DATABASE_URL);
 databaseUrl.searchParams.delete('sslmode');
 
 const aivenCa = process.env.AIVEN_CA_PEM?.replace(/\\n/g, '\n');
+const poolMax = Math.max(1, parseInt(process.env.DB_POOL_MAX || '10', 10));
 const pool = new Pool({
   connectionString: databaseUrl.toString(),
   ssl: aivenCa
     ? { ca: aivenCa, rejectUnauthorized: true }
     : { rejectUnauthorized: false },
-  max: 10,
+  max: poolMax,
   idleTimeoutMillis: 20_000,
   connectionTimeoutMillis: 15_000,
   keepAlive: true,
@@ -249,6 +250,10 @@ async function ensureTransactionSchema() {
     FOR EACH ROW EXECUTE FUNCTION app_touch_transaction_updated_at()
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS transactions_updated_at_idx ON transactions(updated_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS transactions_recorded_by_idx ON transactions(recorded_by)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS transactions_date_idx ON transactions(date DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS transactions_payment_method_idx ON transactions(payment_method)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS transactions_company_idx ON transactions(company)`);
 
   // Durable cross-device reconciliation log. Socket.IO gives connected clients an
   // instant update, while this append-only cursor lets a client that was closed
@@ -437,14 +442,17 @@ async function ensureTransactionSchema() {
     FOR EACH ROW EXECUTE FUNCTION app_sync_cash_note_inventory_trigger()
   `);
 
-  // Rebuild during deployment/startup so all historic Aiven transactions become
-  // the opening balance. Afterwards the trigger keeps this table in sync without
-  // rescanning the full history on every app request.
-  await pool.query('UPDATE cash_note_inventory SET note_count = 0, updated_at = CURRENT_TIMESTAMP');
-  await pool.query(`
-    SELECT app_apply_cash_note_inventory(payment_method, type, breakdown, 1)
-    FROM transactions
-  `);
+  // Rebuild only when empty or explicitly requested, so normal server restarts
+  // and Render cold starts boot instantly without rescanning full transaction history.
+  const forceRebuild = process.env.FORCE_REBUILD_INVENTORY === 'true';
+  const existingGlobalNotes = await pool.query('SELECT 1 FROM cash_note_inventory WHERE note_count <> 0 LIMIT 1');
+  if (forceRebuild || existingGlobalNotes.rowCount === 0) {
+    await pool.query('UPDATE cash_note_inventory SET note_count = 0, updated_at = CURRENT_TIMESTAMP');
+    await pool.query(`
+      SELECT app_apply_cash_note_inventory(payment_method, type, breakdown, 1)
+      FROM transactions
+    `);
+  }
 
   // Each recorder gets their own seven-row cash inventory. Owner keys are the
   // same compact identity rule already used by the client to match old and new
@@ -540,13 +548,16 @@ async function ensureTransactionSchema() {
     FOR EACH ROW EXECUTE FUNCTION app_sync_user_cash_note_inventory_trigger()
   `);
 
-  // One startup backfill makes every existing recorder's balance available as
-  // a direct table lookup. Normal app use only applies O(number of notes) deltas.
-  await pool.query('DELETE FROM cash_note_inventory_by_user');
-  await pool.query(`
-    SELECT app_apply_user_cash_note_inventory(recorded_by, payment_method, type, breakdown, 1)
-    FROM transactions
-  `);
+  // Populate only when empty or explicitly requested, so normal server restarts
+  // boot immediately. Triggers maintain the table on every insert/update/delete.
+  const existingUserNotes = await pool.query('SELECT 1 FROM cash_note_inventory_by_user LIMIT 1');
+  if (forceRebuild || existingUserNotes.rowCount === 0) {
+    await pool.query('DELETE FROM cash_note_inventory_by_user');
+    await pool.query(`
+      SELECT app_apply_user_cash_note_inventory(recorded_by, payment_method, type, breakdown, 1)
+      FROM transactions
+    `);
+  }
 }
 
 const schemaReady = ensureTransactionSchema().catch((err) => {
