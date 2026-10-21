@@ -375,6 +375,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const pendingUpdateIdsRef = useRef<Set<string>>(new Set<string>());
   // Track recently confirmed edits until one authoritative full refresh completes.
   const recentlyUpdatedIdsRef = useRef<Set<string>>(new Set<string>());
+  // Track transactions actively being processed/uploaded to prevent duplicate concurrent uploads
+  const activeProcessingTransactionIdsRef = useRef<Set<string>>(new Set<string>());
   // Socket.IO is instant only while a client is alive. This persisted cursor is
   // the durable recovery point for a web tab or APK that was completely closed.
   const transactionChangeCursorRef = useRef<number>((() => {
@@ -634,6 +636,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       const idRecordMap: Record<string, string> = {};
 
       for (const localTx of unsyncedLocal) {
+        if (activeProcessingTransactionIdsRef.current.has(localTx.id)) {
+          console.log(`⏳ Skipping transaction ${localTx.id} in manual sync — already actively uploading.`);
+          continue;
+        }
         console.log(`📤 Uploading offline transaction ${localTx.id} to Aiven PostgreSQL.`);
 
         let txToSend: Transaction = { ...localTx };
@@ -916,6 +922,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         if (unsyncedLocal.length > 0) {
           console.log(`📤 Auto-syncing ${unsyncedLocal.length} offline transaction(s)...`);
           for (const tx of unsyncedLocal) {
+            if (activeProcessingTransactionIdsRef.current.has(tx.id)) {
+              console.log(`⏳ Skipping transaction ${tx.id} in auto-sync — already actively uploading.`);
+              continue;
+            }
             const isExistingServerTransaction = !tx.id.startsWith('temp_') && !tx.id.startsWith('recovered_');
 
             let txToSend: Transaction = { ...tx };
@@ -1311,6 +1321,9 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         applyBreakdownToVault(newTransaction.breakdown as Record<string, number>, newTransaction.type as 'credit' | 'debit', 1);
       }
 
+      // Lock transaction ID so background auto-sync doesn't concurrently process or double-upload it
+      activeProcessingTransactionIdsRef.current.add(tempId);
+
       // STEP 3: Every new entry attempts the PostgreSQL write immediately. databaseConnected is
       // only an observed connection state; it must never decide whether a user write is sent.
       (async () => {
@@ -1362,6 +1375,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           // Keep the local isSynced:false record so the normal sync queue can retry it.
           setDatabaseConnected(false);
           console.error("Background PostgreSQL save error:", e);
+        } finally {
+          activeProcessingTransactionIdsRef.current.delete(tempId);
         }
       })();
 
@@ -1602,6 +1617,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     // Save flow tabhi successful mana jayega jab PostgreSQL PUT confirm ho.
     // Edit page is promise ko await karta hai, isliye false-success redirect nahi hoga.
     await (async () => {
+      activeProcessingTransactionIdsRef.current.add(optimisticUpdate.id);
       try {
         // Working copy banao — original React state object ko mutate mat karo.
         let txToProcess: Transaction = { ...optimisticUpdate };
@@ -1701,6 +1717,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       } catch (error) {
         console.error(`❌ Transaction update failed:`, error);
         throw error;
+      } finally {
+        activeProcessingTransactionIdsRef.current.delete(optimisticUpdate.id);
       }
     })();
   }, [databaseConnected]);

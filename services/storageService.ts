@@ -13,8 +13,11 @@ export interface UploadResult {
   provider: 'cloudinary';
 }
 
+// In-flight upload cache: Prevents duplicate simultaneous uploads of the same image
+const inFlightUploads = new Map<string, Promise<string | null>>();
+
 /**
- * Uploads a slip (Image or PDF) to Cloudinary with compression.
+ * Uploads a slip (Image or PDF) to Cloudinary with compression and deduplication.
  */
 export const uploadSlip = async (rawBase64Data: string): Promise<string | null> => {
   if (!rawBase64Data || typeof rawBase64Data !== 'string') return null;
@@ -24,54 +27,74 @@ export const uploadSlip = async (rawBase64Data: string): Promise<string | null> 
     return rawBase64Data;
   }
 
-  let dataToUpload = rawBase64Data;
+  // Deduplication fingerprint to catch concurrent upload attempts
+  const uploadKey = rawBase64Data.length > 300
+    ? `${rawBase64Data.slice(0, 150)}_${rawBase64Data.length}_${rawBase64Data.slice(-150)}`
+    : rawBase64Data;
 
-  // Step 1: Compress image on client-side if it's not a PDF
-  try {
-    if (rawBase64Data.startsWith('data:image/')) {
-      dataToUpload = await compressImageBase64(rawBase64Data, {
-        maxWidth: 1280,
-        maxHeight: 1280,
-        quality: 0.75,
-      });
-    }
-  } catch (compErr) {
-    console.warn('[StorageService] Compression error, using original:', compErr);
+  const existingInFlight = inFlightUploads.get(uploadKey);
+  if (existingInFlight) {
+    console.log('[StorageService] 🔄 Upload already in progress for this image, reusing active request to avoid duplicates.');
+    return existingInFlight;
   }
 
-  // Step 2: Cloudinary Direct Upload (Fast Global CDN)
-  try {
-    console.log('[StorageService] Uploading slip to Cloudinary...');
-    const formData = new FormData();
-    formData.append('file', dataToUpload);
-    formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
+  const uploadPromise = (async (): Promise<string | null> => {
+    try {
+      let dataToUpload = rawBase64Data;
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s timeout for slow networks
-
-    const response = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, {
-      method: 'POST',
-      body: formData,
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (response.ok) {
-      const data = await response.json();
-      if (data.secure_url) {
-        console.log('[StorageService] ✅ Cloudinary upload success:', data.secure_url);
-        return data.secure_url;
+      // Step 1: Compress image on client-side if it's not a PDF
+      try {
+        if (rawBase64Data.startsWith('data:image/')) {
+          dataToUpload = await compressImageBase64(rawBase64Data, {
+            maxWidth: 1280,
+            maxHeight: 1280,
+            quality: 0.75,
+          });
+        }
+      } catch (compErr) {
+        console.warn('[StorageService] Compression error, using original:', compErr);
       }
-    } else {
-      const errorText = await response.text();
-      console.warn('[StorageService] ⚠️ Cloudinary upload returned non-200:', response.status, errorText);
-    }
-  } catch (cloudErr) {
-    console.error('[StorageService] ❌ Cloudinary upload failed:', cloudErr);
-  }
 
-  return null;
+      // Step 2: Cloudinary Direct Upload (Fast Global CDN)
+      try {
+        console.log('[StorageService] Uploading slip to Cloudinary...');
+        const formData = new FormData();
+        formData.append('file', dataToUpload);
+        formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s timeout for slow networks
+
+        const response = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, {
+          method: 'POST',
+          body: formData,
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.secure_url) {
+            console.log('[StorageService] ✅ Cloudinary upload success:', data.secure_url);
+            return data.secure_url;
+          }
+        } else {
+          const errorText = await response.text();
+          console.warn('[StorageService] ⚠️ Cloudinary upload returned non-200:', response.status, errorText);
+        }
+      } catch (cloudErr) {
+        console.error('[StorageService] ❌ Cloudinary upload failed:', cloudErr);
+      }
+
+      return null;
+    } finally {
+      inFlightUploads.delete(uploadKey);
+    }
+  })();
+
+  inFlightUploads.set(uploadKey, uploadPromise);
+  return uploadPromise;
 };
 
 /**
