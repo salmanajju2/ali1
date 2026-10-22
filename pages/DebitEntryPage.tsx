@@ -125,8 +125,16 @@ const DebitEntryPage: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!amount || amount <= 0) {
+    if (!amount || Number(amount) <= 0) {
       setError("Amount must be a positive number.");
+      return;
+    }
+    if (!selectedCompany || !selectedCompany.trim()) {
+      setError("Company is required.");
+      return;
+    }
+    if (!companyLocation || !companyLocation.trim()) {
+      setError("Location is required.");
       return;
     }
 

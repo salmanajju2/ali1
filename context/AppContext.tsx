@@ -340,12 +340,20 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     }
   }, []);
   const [companyNames, setCompanyNames] = useState<string[]>(() => {
-    const saved = localStorage.getItem('companyNames');
-    return saved ? JSON.parse(saved) : defaultCompanyNames;
+    try {
+      const saved = localStorage.getItem('companyNames');
+      return saved ? JSON.parse(saved) : defaultCompanyNames;
+    } catch {
+      return defaultCompanyNames;
+    }
   });
   const [locations, setLocations] = useState<string[]>(() => {
-    const saved = localStorage.getItem('locations');
-    return saved ? JSON.parse(saved) : LOCATIONS;
+    try {
+      const saved = localStorage.getItem('locations');
+      return saved ? JSON.parse(saved) : LOCATIONS;
+    } catch {
+      return LOCATIONS;
+    }
   });
   const [databaseConnected, setDatabaseConnected] = useState(false);
   // RealtimeSyncService may connect before React registers its status callback.
@@ -455,8 +463,12 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   }, [allTransactions]);
 
   const [customBanks, setCustomBanks] = useState<{name: string, logo: string}[]>(() => {
-    const saved = localStorage.getItem('customBanks');
-    return saved ? JSON.parse(saved) : [];
+    try {
+      const saved = localStorage.getItem('customBanks');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
   });
 
   const allBankNames = useMemo(() => {
@@ -1428,16 +1440,20 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         console.error("❌ LocalDB forward entry save failed:", e);
       }
 
+      activeProcessingTransactionIdsRef.current.add(debitTempId);
+      activeProcessingTransactionIdsRef.current.add(creditTempId);
+
       // UI update after LocalDB save
       setAllTransactions(prev => [newDebitTransaction, newCreditTransaction, ...prev].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
 
       (async () => {
         setSyncStatus('syncing');
-        // The connection flag is diagnostic only. Always attempt both PostgreSQL writes.
-        const [serverIdDebit, serverIdCredit] = await Promise.all([
-          aivenDatabase.addTransaction(newDebitTransaction),
-          aivenDatabase.addTransaction(newCreditTransaction),
-        ]);
+        try {
+          // The connection flag is diagnostic only. Always attempt both PostgreSQL writes.
+          const [serverIdDebit, serverIdCredit] = await Promise.all([
+            aivenDatabase.addTransaction(newDebitTransaction),
+            aivenDatabase.addTransaction(newCreditTransaction),
+          ]);
 
           if (serverIdDebit && serverIdCredit) {
             const oldIdDebit = newDebitTransaction.id;
@@ -1481,6 +1497,10 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
         setDatabaseConnected(Boolean(serverIdDebit && serverIdCredit));
         setSyncStatus(serverIdDebit && serverIdCredit ? 'success' : 'idle');
+      } finally {
+        activeProcessingTransactionIdsRef.current.delete(debitTempId);
+        activeProcessingTransactionIdsRef.current.delete(creditTempId);
+      }
       })().catch(error => {
         setSyncStatus('error');
         console.error(`Failed to save or sync forward entry:`, error);
@@ -1542,28 +1562,41 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         { ...creditTx, id: id2, clientId: id2, isSynced: false }
       ];
 
+      activeProcessingTransactionIdsRef.current.add(id1);
+      activeProcessingTransactionIdsRef.current.add(id2);
+
+      try {
+        await localDB.saveTransaction(newTransactions[0]);
+        await localDB.saveTransaction(newTransactions[1]);
+      } catch (e) {
+        console.error('LocalDB settlement pre-save failed:', e);
+      }
+
       // Use functional update to avoid stale allTransactions closure
       setAllTransactions(prev => [...newTransactions, ...prev].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
       // Balances and Vault update automatically via useMemo when allTransactions changes
 
-
       // Persist in the background. The connection indicator must not suppress a user write.
       (async () => {
-        let allWritesSucceeded = true;
-        for (const tx of newTransactions) {
-          await localDB.saveTransaction(tx);
-          const serverId = await aivenDatabase.addTransaction(tx);
-          if (serverId) {
-            const synced = { ...tx, id: serverId, isSynced: true };
-            await localDB.deleteTransaction(tx.id);
-            await localDB.saveTransaction(synced);
-            setAllTransactions(prev => prev.map(t => t.id === tx.id ? synced : t));
-            realtimeSync.notifyUpdate({ action: 'add', transaction: synced });
-          } else {
-            allWritesSucceeded = false;
+        try {
+          let allWritesSucceeded = true;
+          for (const tx of newTransactions) {
+            const serverId = await aivenDatabase.addTransaction(tx);
+            if (serverId) {
+              const synced = { ...tx, id: serverId, isSynced: true };
+              await localDB.deleteTransaction(tx.id);
+              await localDB.saveTransaction(synced);
+              setAllTransactions(prev => prev.map(t => t.id === tx.id ? synced : t));
+              realtimeSync.notifyUpdate({ action: 'add', transaction: synced });
+            } else {
+              allWritesSucceeded = false;
+            }
           }
+          setDatabaseConnected(allWritesSucceeded);
+        } finally {
+          activeProcessingTransactionIdsRef.current.delete(id1);
+          activeProcessingTransactionIdsRef.current.delete(id2);
         }
-        setDatabaseConnected(allWritesSucceeded);
       })().catch(error => {
         setDatabaseConnected(false);
         console.error('Failed to save settlement transactions to PostgreSQL:', error);
@@ -1593,26 +1626,20 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     }
 
     // UI update (LocalDB save ke baad). Keep isSynced:false until the PUT succeeds.
-    let capturedOriginal: Transaction | undefined;
+    const capturedOriginal = allTransactionsRef.current.find(tx => String(tx.id) === String(optimisticUpdate.id));
     setAllTransactions(prev => {
-      capturedOriginal = prev.find(tx => String(tx.id) === String(optimisticUpdate.id));
       const updated = prev.map(tx => String(tx.id) === String(optimisticUpdate.id) ? optimisticUpdate : tx)
         .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
       return updated;
     });
 
     // ✅ OPTIMISTIC VAULT: Edit ke baad vault turant diff apply karo
-    // (capturedOriginal async setState callback mein milega — yahan setTimeout se access karo)
-    setTimeout(() => {
-      if (capturedOriginal && capturedOriginal.paymentMethod === 'cash' && capturedOriginal.breakdown) {
-        // Pehle old breakdown subtract karo
-        applyBreakdownToVault(capturedOriginal.breakdown as Record<string, number>, capturedOriginal.type as 'credit' | 'debit', -1);
-      }
-      if (optimisticUpdate.paymentMethod === 'cash' && optimisticUpdate.breakdown) {
-        // Phir new breakdown add karo
-        applyBreakdownToVault(optimisticUpdate.breakdown as Record<string, number>, optimisticUpdate.type as 'credit' | 'debit', 1);
-      }
-    }, 0);
+    if (capturedOriginal && capturedOriginal.paymentMethod === 'cash' && capturedOriginal.breakdown) {
+      applyBreakdownToVault(capturedOriginal.breakdown as Record<string, number>, capturedOriginal.type as 'credit' | 'debit', -1);
+    }
+    if (optimisticUpdate.paymentMethod === 'cash' && optimisticUpdate.breakdown) {
+      applyBreakdownToVault(optimisticUpdate.breakdown as Record<string, number>, optimisticUpdate.type as 'credit' | 'debit', 1);
+    }
 
     // Save flow tabhi successful mana jayega jab PostgreSQL PUT confirm ho.
     // Edit page is promise ko await karta hai, isliye false-success redirect nahi hoga.
@@ -1839,17 +1866,17 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       const newBank = { name, logo: logo || 'https://cdn-icons-png.flaticon.com/512/2830/2830284.png' };
       const updated = [...customBanks, newBank];
       setCustomBanks(updated);
-      localStorage.setItem('customBanks', JSON.stringify(updated));
+      try { localStorage.setItem('customBanks', JSON.stringify(updated)); } catch {}
     },
     deleteBank: async (name: string) => {
       const updated = customBanks.filter(b => b.name !== name);
       setCustomBanks(updated);
-      localStorage.setItem('customBanks', JSON.stringify(updated));
+      try { localStorage.setItem('customBanks', JSON.stringify(updated)); } catch {}
     },
     updateBank: async (oldName: string, newName: string) => {
       const updated = customBanks.map(b => b.name === oldName ? { ...b, name: newName } : b);
       setCustomBanks(updated);
-      localStorage.setItem('customBanks', JSON.stringify(updated));
+      try { localStorage.setItem('customBanks', JSON.stringify(updated)); } catch {}
     },
     allBankNames,
     allBankLogos,

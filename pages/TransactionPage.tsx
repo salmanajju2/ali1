@@ -209,8 +209,8 @@ const TransactionPage: React.FC = () => {
       setError("Location is a required field.");
       return;
     }
-    if (totalAmount < 0) {
-      setError("Transaction amount cannot be negative.");
+    if (totalAmount <= 0) {
+      setError("Transaction amount must be greater than zero.");
       return;
     }
 

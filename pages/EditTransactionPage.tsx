@@ -193,12 +193,17 @@ const EditTransactionPage: React.FC = () => {
             return;
         }
 
-        setError(null);
-        setIsSubmitting(true);
-
         const finalAmount = showDenominations
             ? DENOMINATIONS.reduce((sum, denom) => sum + (breakdown[denom] || 0) * denom, 0)
-            : amount;
+            : Number(amount);
+
+        if (!finalAmount || finalAmount <= 0) {
+            setError("Amount must be a positive number.");
+            return;
+        }
+
+        setError(null);
+        setIsSubmitting(true);
 
         const updatedTx: Transaction = {
             ...transaction!,

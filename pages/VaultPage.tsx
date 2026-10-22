@@ -82,10 +82,14 @@ const VaultPage: React.FC = () => {
     });
 
     filteredTransactions.forEach(tx => {
-      if (tx.breakdown && typeof tx.breakdown === 'object') {
-        for (const denomStr in tx.breakdown) {
+      let bd = tx.breakdown;
+      if (typeof bd === 'string') {
+        try { bd = JSON.parse(bd); } catch { bd = null; }
+      }
+      if (bd && typeof bd === 'object') {
+        for (const denomStr in bd) {
           const denom = parseInt(denomStr, 10);
-          const count = tx.breakdown[denom] || 0;
+          const count = (bd as any)[denom] || 0;
           if (DENOMINATIONS.includes(denom)) {
             if (tx.type === 'credit') {
               activityVault[denom] = (activityVault[denom] || 0) + count;

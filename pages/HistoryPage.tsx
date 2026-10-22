@@ -692,16 +692,23 @@ const HistoryPage: React.FC = () => {
                       <div style={{color:'#1E1B4B'}}><strong>Company:</strong> {tx.company || 'N/A'}</div>
                       <div style={{color:'#1E1B4B'}}><strong>Location:</strong> {tx.location}</div>
                     </div>
-                    {tx.breakdown && Object.keys(tx.breakdown).length > 0 && (
-                      <div>
-                        <h4 className="font-semibold mb-2">Denomination Breakdown:</h4>
-                        <div className="space-y-1">
-                          {Object.entries(tx.breakdown).sort(([a], [b]) => parseInt(b) - parseInt(a)).map(([denom, count]) => (
-                            <div key={denom}>₹{denom}: {count} notes = ₹{(parseInt(denom) * (count || 0)).toLocaleString('en-IN')}</div>
-                          ))}
+                    {(() => {
+                      let bd = tx.breakdown;
+                      if (typeof bd === 'string') {
+                        try { bd = JSON.parse(bd); } catch { bd = null; }
+                      }
+                      if (!bd || typeof bd !== 'object' || Object.keys(bd).length === 0) return null;
+                      return (
+                        <div>
+                          <h4 className="font-semibold mb-2">Denomination Breakdown:</h4>
+                          <div className="space-y-1">
+                            {Object.entries(bd).sort(([a], [b]) => parseInt(b) - parseInt(a)).map(([denom, count]) => (
+                              <div key={denom}>₹{denom}: {count as number} notes = ₹{(parseInt(denom) * (Number(count) || 0)).toLocaleString('en-IN')}</div>
+                            ))}
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      );
+                    })()}
                     {tx.slip && (
                       <div className="mt-4">
                         <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Transaction Slip</h4>

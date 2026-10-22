@@ -125,15 +125,21 @@ class IndexedDBService {
     }
   }
 
-  public async deleteTransaction(id: string): Promise<void> {
+  public async deleteTransaction(id: string | number): Promise<void> {
     const db = await this.getDB();
     return new Promise((resolve, reject) => {
       const transactionObj = db.transaction([STORE_NAME], 'readwrite');
       const store = transactionObj.objectStore(STORE_NAME);
-      const request = store.delete(id);
+      const strId = String(id);
+      store.delete(strId);
+      const numId = Number(id);
+      if (!Number.isNaN(numId) && String(numId) === strId) {
+        store.delete(numId);
+      }
 
-      request.onsuccess = () => resolve();
-      request.onerror = (event: any) => reject(event.target.error);
+      transactionObj.oncomplete = () => resolve();
+      transactionObj.onerror = (event: any) => reject(event.target.error);
+      transactionObj.onabort = (event: any) => reject(event.target.error || new Error('IndexedDB delete aborted'));
     });
   }
 
