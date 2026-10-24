@@ -472,7 +472,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   });
 
   const allBankNames = useMemo(() => {
-    const priority = ["PHONEPE QR", "GPAY QR", "SPICEMONEY QR", "7902099709", "SACHIN"];
+    const priority = ["PHONEPE QR", "GPAY QR", "SPICEMONEY QR", "LAXMAN", "SACHIN"];
     const names = [...BANK_NAMES, ...customBanks.map(b => b.name)];
     const uniqueNames = Array.from(new Set(names));
     
@@ -490,7 +490,11 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
 
 
   const allBankLogos = useMemo(() => {
-    return { ...BANK_LOGOS, ...Object.fromEntries(customBanks.map(b => [b.name, b.logo])) };
+    return {
+      ...BANK_LOGOS,
+      "7902099709": BANK_LOGOS["LAXMAN"] || "https://upload.wikimedia.org/wikipedia/commons/3/3a/Airtel_logo-01.png",
+      ...Object.fromEntries(customBanks.map(b => [b.name, b.logo]))
+    };
   }, [customBanks]);
 
   const userIdentityKeys = useMemo(() => getUserIdentityKeys(currentUser), [currentUser]);
@@ -510,7 +514,8 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
     }
 
     transactionsForBank.forEach(tx => {
-      if (tx.bank) {
+      const bankKey = tx.bank === '7902099709' ? 'LAXMAN' : tx.bank;
+      if (bankKey) {
         let isIn = false;
         if (tx.paymentMethod === 'upi') {
           isIn = tx.type === 'credit';
@@ -520,9 +525,9 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           else isIn = tx.type === 'credit';
         }
         if (isIn) {
-          balances[tx.bank] = (balances[tx.bank] || 0) + tx.amount;
+          balances[bankKey] = (balances[bankKey] || 0) + tx.amount;
         } else {
-          balances[tx.bank] = (balances[tx.bank] || 0) - tx.amount;
+          balances[bankKey] = (balances[bankKey] || 0) - tx.amount;
         }
       }
     });

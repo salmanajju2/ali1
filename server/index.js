@@ -352,6 +352,7 @@ async function ensureTransactionSchema() {
       ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
   `);
   await pool.query(`UPDATE transactions SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL`);
+  await pool.query(`UPDATE transactions SET bank = 'LAXMAN' WHERE bank = '7902099709'`);
   await pool.query(`
     CREATE OR REPLACE FUNCTION app_touch_transaction_updated_at()
     RETURNS TRIGGER

@@ -33,6 +33,8 @@ const SingleBankHistoryPage: React.FC = () => {
       banksToShow = ['ALI ENTERPRISES', 'BOB', 'AXIS', 'PNB'];
     } else if (bankName === 'FINO') {
       banksToShow = ['FINO', 'BOB FINO', 'PNB FINO', 'SBI FINO', 'SB FINO'];
+    } else if (bankName === 'LAXMAN') {
+      banksToShow = ['LAXMAN', '7902099709'];
     } else if (bankName) {
       banksToShow = [bankName];
     }
@@ -98,6 +100,7 @@ const SingleBankHistoryPage: React.FC = () => {
   const banksForThisAccount = useMemo(() => {
     if (bankName === 'ALI ENTERPRISES') return ['ALI ENTERPRISES', 'BOB', 'AXIS', 'PNB'];
     if (bankName === 'FINO') return ['FINO', 'BOB FINO', 'PNB FINO', 'SBI FINO', 'SB FINO'];
+    if (bankName === 'LAXMAN') return ['LAXMAN', '7902099709'];
     return bankName ? [bankName] : [];
   }, [bankName]);
 
